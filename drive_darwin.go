@@ -5,7 +5,6 @@ package godrivelist
 import (
 	"encoding/xml"
 	"os/exec"
-	"strconv"
 	"strings"
 )
 
@@ -68,9 +67,9 @@ func list() ([]Drive, error) {
 		var infoList struct {
 			XMLName xml.Name `xml:"plist"`
 			Dict    struct {
-				Key   []string      `xml:"key"`
-				Value []string      `xml:"string"`
-				Bool  []bool        `xml:"false,true"`
+				Key   []string `xml:"key"`
+				Value []string `xml:"string"`
+				Bool  []bool   `xml:"false,true"`
 			} `xml:"dict"`
 		}
 
