@@ -5,7 +5,6 @@ package godrivelist
 import (
         "encoding/xml"
         "os/exec"
-        "strconv"
         "strings"
 )
 
