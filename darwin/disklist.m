@@ -1,43 +1,42 @@
 #import <Foundation/Foundation.h>
 #import <DiskArbitration/DiskArbitration.h>
 #include "disklist.h"
-#include <string>
-#include <vector>
+#include <string.h>
 
-bool IsDiskPartition(NSString *disk) {
+static bool IsDiskPartition(NSString *disk) {
     NSPredicate *partitionRegEx = [NSPredicate predicateWithFormat:@"SELF MATCHES %@", @"disk\\d+s\\d+"];
     return [partitionRegEx evaluateWithObject:disk];
 }
 
-NSNumber *DictionaryGetNumber(CFDictionaryRef dict, const void *key) {
+static NSNumber *DictionaryGetNumber(CFDictionaryRef dict, const void *key) {
     return (NSNumber*)CFDictionaryGetValue(dict, key);
 }
 
-DriveInfo CreateDriveInfo(NSString *diskBsdName, CFDictionaryRef diskDescription) {
-    DriveInfo info = {};
+static DriveInfo CreateDriveInfo(NSString *diskBsdName, CFDictionaryRef diskDescription) {
+    DriveInfo info = {0};
     
-    std::string devicePath = "/dev/" + std::string([diskBsdName UTF8String]);
-    info.device = strdup(devicePath.c_str());
-    info.displayName = strdup(devicePath.c_str());
+    NSString *devicePath = [NSString stringWithFormat:@"/dev/%@", diskBsdName];
+    info.device = strdup([devicePath UTF8String]);
+    info.displayName = strdup([devicePath UTF8String]);
     
     NSString *mediaContent = (NSString*)CFDictionaryGetValue(diskDescription, kDADiskDescriptionMediaContentKey);
     NSString *mediaName = (NSString*)CFDictionaryGetValue(diskDescription, kDADiskDescriptionMediaNameKey);
-    std::string description;
+    NSString *description = nil;
     if (mediaContent) {
-        description = [mediaContent UTF8String];
         if (mediaName) {
-            description += " ";
-            description += [mediaName UTF8String];
+            description = [NSString stringWithFormat:@"%@ %@", mediaContent, mediaName];
+        } else {
+            description = mediaContent;
         }
     } else if (mediaName) {
-        description = [mediaName UTF8String];
+        description = mediaName;
     }
-    info.description = strdup(description.c_str());
+    info.description = strdup(description ? [description UTF8String] : "");
     
     info.size = [DictionaryGetNumber(diskDescription, kDADiskDescriptionMediaSizeKey) unsignedLongValue];
     
-    std::string rawPath = "/dev/r" + std::string([diskBsdName UTF8String]);
-    info.raw = strdup(rawPath.c_str());
+    NSString *rawPath = [NSString stringWithFormat:@"/dev/r%@", diskBsdName];
+    info.raw = strdup([rawPath UTF8String]);
     
     info.protected = ![DictionaryGetNumber(diskDescription, kDADiskDescriptionMediaWritableKey) boolValue];
     
@@ -48,20 +47,16 @@ DriveInfo CreateDriveInfo(NSString *diskBsdName, CFDictionaryRef diskDescription
     return info;
 }
 
-extern "C" {
-
 DriveList* GetDriveList(void) {
-    DriveList* result = (DriveList*)malloc(sizeof(DriveList));
-    std::vector<DriveInfo> drives;
+    DriveList* result = (DriveList*)calloc(1, sizeof(DriveList));
+    NSMutableArray *drives = [NSMutableArray array];
     
     DASessionRef session = DASessionCreate(kCFAllocatorDefault);
     if (session == nil) {
-        result->drives = NULL;
-        result->count = 0;
         return result;
     }
     
-    NSArray *volumeKeys = [NSArray arrayWithObjects:NSURLVolumeNameKey, NSURLVolumeLocalizedNameKey, nil];
+    NSArray *volumeKeys = @[NSURLVolumeNameKey, NSURLVolumeLocalizedNameKey];
     NSArray *volumePaths = [[NSFileManager defaultManager] mountedVolumeURLsIncludingResourceValuesForKeys:volumeKeys options:0];
     
     NSFileManager *fileManager = [NSFileManager defaultManager];
@@ -86,7 +81,7 @@ DriveList* GetDriveList(void) {
         DriveInfo info = CreateDriveInfo(path, diskDescription);
         
         // Get mountpoints
-        std::vector<std::string> mountpoints;
+        NSMutableArray *mountpoints = [NSMutableArray array];
         for (NSURL *volumePath in volumePaths) {
             DADiskRef volumeDisk = DADiskCreateFromVolumePath(kCFAllocatorDefault, session, (__bridge CFURLRef)volumePath);
             if (volumeDisk == nil) {
@@ -99,28 +94,26 @@ DriveList* GetDriveList(void) {
                 continue;
             }
             
-            std::string partitionBsdName = std::string(bsdnameChar);
-            std::string diskBsdName = partitionBsdName.substr(0, partitionBsdName.find("s", 5));
+            NSString *partitionBsdName = [NSString stringWithUTF8String:bsdnameChar];
+            NSString *diskBsdName = [partitionBsdName substringWithRange:NSMakeRange(0, [partitionBsdName rangeOfString:@"s" options:0 range:NSMakeRange(5, [partitionBsdName length] - 5)].location)];
             
-            if (diskBsdName == [path UTF8String]) {
-                mountpoints.push_back([[volumePath path] UTF8String]);
+            if ([diskBsdName isEqualToString:path]) {
+                [mountpoints addObject:[volumePath path]];
             }
             
             CFRelease(volumeDisk);
         }
         
         // Copy mountpoints to DriveInfo
-        info.mountpointsCount = mountpoints.size();
+        info.mountpointsCount = (int)[mountpoints count];
         if (info.mountpointsCount > 0) {
             info.mountpoints = (char**)malloc(sizeof(char*) * info.mountpointsCount);
             for (int i = 0; i < info.mountpointsCount; i++) {
-                info.mountpoints[i] = strdup(mountpoints[i].c_str());
+                info.mountpoints[i] = strdup([[mountpoints objectAtIndex:i] UTF8String]);
             }
-        } else {
-            info.mountpoints = NULL;
         }
         
-        drives.push_back(info);
+        [drives addObject:[NSValue valueWithBytes:&info objCType:@encode(DriveInfo)]];
         
         CFRelease(diskDescription);
         CFRelease(disk);
@@ -129,9 +122,13 @@ DriveList* GetDriveList(void) {
     CFRelease(session);
     
     // Copy drives to result
-    result->count = drives.size();
+    result->count = (int)[drives count];
     result->drives = (DriveInfo*)malloc(sizeof(DriveInfo) * result->count);
-    memcpy(result->drives, drives.data(), sizeof(DriveInfo) * result->count);
+    for (int i = 0; i < result->count; i++) {
+        DriveInfo info;
+        [[drives objectAtIndex:i] getValue:&info];
+        result->drives[i] = info;
+    }
     
     return result;
 }
@@ -155,6 +152,4 @@ void FreeDriveList(DriveList* list) {
     
     free(list->drives);
     free(list);
-}
-
 }
