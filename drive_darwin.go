@@ -17,36 +17,47 @@ type diskutilList struct {
                                 Key    []string `xml:"key"`
                                 String []string `xml:"string"`
                                 Int    []int64  `xml:"integer"`
+                                Bool   []bool   `xml:"false,true"`
                         } `xml:"dict"`
                 } `xml:"array"`
         } `xml:"dict"`
+}
+
+type dictValue struct {
+        stringVal string
+        intVal    int64
+        boolVal   bool
+        valueType string // "string", "int", or "bool"
 }
 
 func findValueByKey(dict struct {
         Key    []string `xml:"key"`
         String []string `xml:"string"`
         Int    []int64  `xml:"integer"`
-}, searchKey string) (string, int64, bool) {
-        stringIdx := 0
-        intIdx := 0
-        for _, key := range dict.Key {
-                if key == searchKey {
-                        if searchKey == "Size" && len(dict.Int) > intIdx {
-                                return "", dict.Int[intIdx], true
-                        } else if len(dict.String) > stringIdx {
-                                return dict.String[stringIdx], 0, true
-                        }
-                        return "", 0, false
-                }
-                // Only increment the appropriate index based on the expected type
-                switch key {
+        Bool   []bool   `xml:"false,true"`
+}, searchKey string) dictValue {
+        valueMap := make(map[string]int)
+        for i, key := range dict.Key {
+                valueMap[key] = i
+        }
+
+        if idx, exists := valueMap[searchKey]; exists {
+                switch searchKey {
                 case "Size", "TotalSize":
-                        intIdx++
+                        if idx < len(dict.Int) {
+                                return dictValue{intVal: dict.Int[idx], valueType: "int"}
+                        }
+                case "Internal", "Ejectable", "WritableMedia":
+                        if idx < len(dict.Bool) {
+                                return dictValue{boolVal: dict.Bool[idx], valueType: "bool"}
+                        }
                 default:
-                        stringIdx++
+                        if idx < len(dict.String) {
+                                return dictValue{stringVal: dict.String[idx], valueType: "string"}
+                        }
                 }
         }
-        return "", 0, false
+        return dictValue{} // Return empty value if not found or index out of bounds
 }
 
 func list() ([]Drive, error) {
@@ -69,30 +80,31 @@ func list() ([]Drive, error) {
                 var mountpoints []Mountpoint
 
                 // Get device identifier
-                if devID, _, ok := findValueByKey(dict, "DeviceIdentifier"); ok {
-                        device = "/dev/" + devID
+                devIDValue := findValueByKey(dict, "DeviceIdentifier")
+                if devIDValue.valueType == "string" {
+                        device = "/dev/" + devIDValue.stringVal
                 } else {
                         continue
                 }
 
                 // Get device node (overrides device identifier if present)
-                if devNode, _, ok := findValueByKey(dict, "DeviceNode"); ok {
-                        device = devNode
+                if devNodeValue := findValueByKey(dict, "DeviceNode"); devNodeValue.valueType == "string" {
+                        device = devNodeValue.stringVal
                 }
 
                 // Get volume name for description
-                if volName, _, ok := findValueByKey(dict, "VolumeName"); ok {
-                        description = volName
+                if volNameValue := findValueByKey(dict, "VolumeName"); volNameValue.valueType == "string" {
+                        description = volNameValue.stringVal
                 }
 
                 // Get size
-                if _, sz, ok := findValueByKey(dict, "Size"); ok {
-                        size = sz
+                if sizeValue := findValueByKey(dict, "Size"); sizeValue.valueType == "int" {
+                        size = sizeValue.intVal
                 }
 
                 // Get mount point
-                if mountPoint, _, ok := findValueByKey(dict, "MountPoint"); ok && mountPoint != "" {
-                        mountpoints = append(mountpoints, Mountpoint{Path: mountPoint})
+                if mountPointValue := findValueByKey(dict, "MountPoint"); mountPointValue.valueType == "string" && mountPointValue.stringVal != "" {
+                        mountpoints = append(mountpoints, Mountpoint{Path: mountPointValue.stringVal})
                 }
 
                 // Get additional disk info
@@ -112,14 +124,14 @@ func list() ([]Drive, error) {
 
                 // Process disk info
                 for _, infoDict := range infoList.Dict.Array.Dict {
-                        if internal, _, ok := findValueByKey(infoDict, "Internal"); ok {
-                                isSystem = internal == "Yes"
+                        if internalValue := findValueByKey(infoDict, "Internal"); internalValue.valueType == "bool" {
+                                isSystem = internalValue.boolVal
                         }
-                        if ejectable, _, ok := findValueByKey(infoDict, "Ejectable"); ok {
-                                isSystem = isSystem || ejectable == "No"
+                        if ejectableValue := findValueByKey(infoDict, "Ejectable"); ejectableValue.valueType == "bool" {
+                                isSystem = isSystem || !ejectableValue.boolVal
                         }
-                        if writable, _, ok := findValueByKey(infoDict, "WritableMedia"); ok {
-                                isProtected = writable == "No"
+                        if writableValue := findValueByKey(infoDict, "WritableMedia"); writableValue.valueType == "bool" {
+                                isProtected = !writableValue.boolVal
                         }
                 }
 
