@@ -3,8 +3,8 @@
 package godrivelist
 
 /*
-#cgo CFLAGS: -x objective-c -I${SRCDIR}/darwin
-#cgo LDFLAGS: -framework Foundation -framework DiskArbitration
+#cgo CFLAGS: -x objective-c -I${SRCDIR}/darwin -arch arm64
+#cgo LDFLAGS: -framework Foundation -framework DiskArbitration -arch arm64
 #include "disklist.h"
 */
 import "C"
