@@ -116,6 +116,29 @@ The project has platform-specific implementations:
 
 - Uses DiskArbitration framework and IOKit to get disk information
 - Provides raw device paths with `/dev/rdisk` prefix
+- Handles APFS virtual volumes correctly
+
+## Building from Source
+
+This project contains C code for macOS, which requires appropriate build tools:
+
+### macOS
+
+You'll need:
+- Xcode Command Line Tools
+- The Go toolchain
+
+### Windows
+
+You'll need:
+- Go toolchain
+- MinGW or GCC if building cross-platform
+
+### Linux
+
+You'll need:
+- Go toolchain
+- GCC or Clang
 
 ## License
 

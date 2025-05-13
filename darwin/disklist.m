@@ -1,227 +1,283 @@
-#import <Foundation/Foundation.h>
-#import <DiskArbitration/DiskArbitration.h>
-#import "disklist.h"
+#include "disklist.h"
+#include <IOKit/IOKitLib.h>
+#include <IOKit/storage/IOStorageDeviceCharacteristics.h>
+#include <IOKit/storage/IOMedia.h>
+#include <IOKit/storage/IOBlockStorageDriver.h>
+#include <IOKit/IOBSD.h>
+#include <DiskArbitration/DiskArbitration.h>
+#include <sys/mount.h>
+#include <stdlib.h>
+#include <string.h>
 
-static void freeDriveInfo(DriveInfo info) {
-    free(info.device);
-    free(info.displayName);
-    free(info.description);
-    free(info.raw);
-    
-    for (int i = 0; i < info.mountpointsCount; i++) {
-        free(info.mountpoints[i].path);
+// Utility function to create a copy of a string
+static char* copy_string(const char* str) {
+    if (str == NULL) return NULL;
+    size_t len = strlen(str);
+    char* result = (char*)malloc(len + 1);
+    if (result) {
+        strcpy(result, str);
     }
-    
-    free(info.mountpoints);
+    return result;
 }
 
-void FreeDriveList(DriveList list) {
+// Function to get mountpoints for a disk
+static void get_mountpoints(const char* bsd_name, mountpoint_t** mountpoints, int* count) {
+    struct statfs* mounts;
+    int num_mounts = getmntinfo(&mounts, MNT_WAIT);
+    
+    // First, count the number of mountpoints for this disk
+    *count = 0;
+    for (int i = 0; i < num_mounts; i++) {
+        if (strstr(mounts[i].f_mntfromname, bsd_name) != NULL) {
+            (*count)++;
+        }
+    }
+    
+    if (*count == 0) {
+        *mountpoints = NULL;
+        return;
+    }
+    
+    // Allocate memory for mountpoints
+    *mountpoints = (mountpoint_t*)malloc(sizeof(mountpoint_t) * (*count));
+    if (*mountpoints == NULL) {
+        *count = 0;
+        return;
+    }
+    
+    // Fill the mountpoints
+    int index = 0;
+    for (int i = 0; i < num_mounts; i++) {
+        if (strstr(mounts[i].f_mntfromname, bsd_name) != NULL) {
+            (*mountpoints)[index].path = copy_string(mounts[i].f_mntonname);
+            (*mountpoints)[index].label = NULL; // No label info in statfs
+            index++;
+        }
+    }
+}
+
+// Check if a disk is a system disk
+static bool is_system_disk(const char* bsd_name) {
+    struct statfs* mounts;
+    int num_mounts = getmntinfo(&mounts, MNT_WAIT);
+    
+    for (int i = 0; i < num_mounts; i++) {
+        if (strstr(mounts[i].f_mntfromname, bsd_name) != NULL && 
+            strcmp(mounts[i].f_mntonname, "/") == 0) {
+            return true;
+        }
+    }
+    
+    return false;
+}
+
+// Get drive information
+drive_list_t GetDriveList() {
+    drive_list_t result = {0};
+    
+    // Initialize the count to 0
+    result.count = 0;
+    result.drives = NULL;
+    result.error = NULL;
+    
+    // Initialize DiskArbitration framework
+    DASessionRef session = DASessionCreate(kCFAllocatorDefault);
+    if (session == NULL) {
+        result.error = copy_string("Failed to create DiskArbitration session");
+        return result;
+    }
+    
+    // Get the list of disks
+    mach_port_t masterPort;
+    kern_return_t kernResult = IOMasterPort(MACH_PORT_NULL, &masterPort);
+    if (kernResult != KERN_SUCCESS) {
+        DASessionUnscheduleFromRunLoop(session, CFRunLoopGetCurrent(), kCFRunLoopDefaultMode);
+        CFRelease(session);
+        result.error = copy_string("Failed to get IO master port");
+        return result;
+    }
+    
+    // Create a matching dictionary for IOMedia objects
+    CFMutableDictionaryRef matchingDict = IOServiceMatching(kIOMediaClass);
+    if (matchingDict == NULL) {
+        DASessionUnscheduleFromRunLoop(session, CFRunLoopGetCurrent(), kCFRunLoopDefaultMode);
+        CFRelease(session);
+        result.error = copy_string("Failed to create matching dictionary");
+        return result;
+    }
+    
+    // Add matching criteria - only want whole media, not partitions
+    CFDictionarySetValue(matchingDict, CFSTR(kIOMediaWholeKey), kCFBooleanTrue);
+    
+    // Get an iterator for matching IOMedia objects
+    io_iterator_t iter;
+    kernResult = IOServiceGetMatchingServices(masterPort, matchingDict, &iter);
+    if (kernResult != KERN_SUCCESS) {
+        DASessionUnscheduleFromRunLoop(session, CFRunLoopGetCurrent(), kCFRunLoopDefaultMode);
+        CFRelease(session);
+        result.error = copy_string("Failed to get matching services");
+        return result;
+    }
+    
+    // Count the number of disks
+    io_service_t disk;
+    while ((disk = IOIteratorNext(iter)) != IO_OBJECT_NULL) {
+        result.count++;
+        IOObjectRelease(disk);
+    }
+    
+    // Reset the iterator
+    IOIteratorReset(iter);
+    
+    // Allocate memory for drives
+    result.drives = (drive_t*)malloc(sizeof(drive_t) * result.count);
+    if (result.drives == NULL) {
+        DASessionUnscheduleFromRunLoop(session, CFRunLoopGetCurrent(), kCFRunLoopDefaultMode);
+        CFRelease(session);
+        IOObjectRelease(iter);
+        result.error = copy_string("Failed to allocate memory for drives");
+        result.count = 0;
+        return result;
+    }
+    
+    // Initialize drives
+    for (int i = 0; i < result.count; i++) {
+        result.drives[i].device = NULL;
+        result.drives[i].display_name = NULL;
+        result.drives[i].description = NULL;
+        result.drives[i].size = 0;
+        result.drives[i].mountpoints = NULL;
+        result.drives[i].mountpoints_count = 0;
+        result.drives[i].raw = NULL;
+        result.drives[i].protected = false;
+        result.drives[i].system = false;
+        result.drives[i].removable = false;
+        result.drives[i].virtual_drive = false;
+        result.drives[i].internal = true;
+        result.drives[i].block_size = 0;
+    }
+    
+    // Get information for each disk
+    int index = 0;
+    while ((disk = IOIteratorNext(iter)) != IO_OBJECT_NULL && index < result.count) {
+        // Get the BSD name
+        CFStringRef bsdNameRef = IORegistryEntryCreateCFProperty(disk, CFSTR(kIOBSDNameKey), kCFAllocatorDefault, 0);
+        if (bsdNameRef != NULL) {
+            char bsd_name[128];
+            CFStringGetCString(bsdNameRef, bsd_name, sizeof(bsd_name), kCFStringEncodingUTF8);
+            CFRelease(bsdNameRef);
+            
+            // Set the device and raw paths
+            char device_path[256];
+            sprintf(device_path, "/dev/%s", bsd_name);
+            result.drives[index].device = copy_string(device_path);
+            
+            char raw_path[256];
+            sprintf(raw_path, "/dev/r%s", bsd_name);
+            result.drives[index].raw = copy_string(raw_path);
+            result.drives[index].display_name = copy_string(device_path);
+            
+            // Get the disk size
+            CFNumberRef sizeRef = IORegistryEntryCreateCFProperty(disk, CFSTR(kIOMediaSizeKey), kCFAllocatorDefault, 0);
+            if (sizeRef != NULL) {
+                CFNumberGetValue(sizeRef, kCFNumberSInt64Type, &result.drives[index].size);
+                CFRelease(sizeRef);
+            }
+            
+            // Get the block size
+            CFNumberRef blockSizeRef = IORegistryEntryCreateCFProperty(disk, CFSTR(kIOMediaPreferredBlockSizeKey), kCFAllocatorDefault, 0);
+            if (blockSizeRef != NULL) {
+                uint32_t block_size;
+                CFNumberGetValue(blockSizeRef, kCFNumberSInt32Type, &block_size);
+                result.drives[index].block_size = block_size;
+                CFRelease(blockSizeRef);
+            } else {
+                result.drives[index].block_size = 512; // Default
+            }
+            
+            // Check if it's a system disk
+            result.drives[index].system = is_system_disk(bsd_name);
+            
+            // Get mountpoints
+            get_mountpoints(bsd_name, &result.drives[index].mountpoints, &result.drives[index].mountpoints_count);
+            
+            // Get disk properties from DiskArbitration
+            DADiskRef dadisk = DADiskCreateFromBSDName(kCFAllocatorDefault, session, bsd_name);
+            if (dadisk != NULL) {
+                CFDictionaryRef description = DADiskCopyDescription(dadisk);
+                if (description != NULL) {
+                    // Get the model/vendor name
+                    CFStringRef model = CFDictionaryGetValue(description, kDADiskDescriptionDeviceModelKey);
+                    if (model != NULL) {
+                        char model_str[256];
+                        CFStringGetCString(model, model_str, sizeof(model_str), kCFStringEncodingUTF8);
+                        result.drives[index].description = copy_string(model_str);
+                    } else {
+                        result.drives[index].description = copy_string("Unknown");
+                    }
+                    
+                    // Check if it's removable
+                    CFBooleanRef removable = CFDictionaryGetValue(description, kDADiskDescriptionMediaRemovableKey);
+                    if (removable != NULL) {
+                        result.drives[index].removable = CFBooleanGetValue(removable);
+                    }
+                    
+                    // Check if it's a virtual disk
+                    CFBooleanRef virtual = CFDictionaryGetValue(description, kDADiskDescriptionMediaVirtualKey);
+                    if (virtual != NULL) {
+                        result.drives[index].virtual_drive = CFBooleanGetValue(virtual);
+                    }
+                    
+                    // Check if it's write-protected
+                    CFBooleanRef writeable = CFDictionaryGetValue(description, kDADiskDescriptionMediaWritableKey);
+                    if (writeable != NULL) {
+                        result.drives[index].protected = !CFBooleanGetValue(writeable);
+                    }
+                    
+                    // Check if it's internal
+                    CFBooleanRef internal = CFDictionaryGetValue(description, kDADiskDescriptionDeviceInternalKey);
+                    if (internal != NULL) {
+                        result.drives[index].internal = CFBooleanGetValue(internal);
+                    }
+                    
+                    CFRelease(description);
+                }
+                CFRelease(dadisk);
+            }
+            
+            index++;
+        }
+        
+        IOObjectRelease(disk);
+    }
+    
+    // Update the count if we found fewer disks than expected
+    result.count = index;
+    
+    // Clean up
+    IOObjectRelease(iter);
+    DASessionUnscheduleFromRunLoop(session, CFRunLoopGetCurrent(), kCFRunLoopDefaultMode);
+    CFRelease(session);
+    
+    return result;
+}
+
+// Free the memory allocated by GetDriveList
+void FreeDriveList(drive_list_t list) {
     for (int i = 0; i < list.count; i++) {
-        freeDriveInfo(list.drives[i]);
+        free(list.drives[i].device);
+        free(list.drives[i].display_name);
+        free(list.drives[i].description);
+        free(list.drives[i].raw);
+        
+        for (int j = 0; j < list.drives[i].mountpoints_count; j++) {
+            free(list.drives[i].mountpoints[j].path);
+            free(list.drives[i].mountpoints[j].label);
+        }
+        
+        free(list.drives[i].mountpoints);
     }
     
     free(list.drives);
-}
-
-static char* strdup_safe(const char* s) {
-    if (s == NULL) {
-        return strdup("");
-    }
-    return strdup(s);
-}
-
-static bool isDiskMountable(DADiskRef disk) {
-    CFBooleanRef boolRef = DADiskCopyWholeDiskHasFixedContent(disk);
-    if (boolRef == NULL) {
-        return true;
-    }
-    
-    bool hasFixedContent = CFBooleanGetValue(boolRef);
-    CFRelease(boolRef);
-    
-    return !hasFixedContent;
-}
-
-static bool isSystemDisk(DADiskRef disk) {
-    CFURLRef url = CFURLCreateWithFileSystemPath(kCFAllocatorDefault, CFSTR("/"), kCFURLPOSIXPathStyle, true);
-    CFBooleanRef result = NULL;
-    
-    if (url != NULL) {
-        CFDictionaryRef mountInfo = DADiskCopyDescription(disk);
-        if (mountInfo != NULL) {
-            CFURLRef mountURL = CFDictionaryGetValue(mountInfo, kDADiskDescriptionVolumePathKey);
-            if (mountURL != NULL) {
-                result = CFURLEqual(url, mountURL) ? kCFBooleanTrue : kCFBooleanFalse;
-            }
-            CFRelease(mountInfo);
-        }
-        CFRelease(url);
-    }
-    
-    return result == kCFBooleanTrue;
-}
-
-static bool isProtectedDisk(DADiskRef disk) {
-    CFDictionaryRef description = DADiskCopyDescription(disk);
-    if (description == NULL) {
-        return false;
-    }
-    
-    CFBooleanRef writable = CFDictionaryGetValue(description, kDADiskDescriptionMediaWritableKey);
-    bool isProtected = (writable == NULL) || (writable == kCFBooleanFalse);
-    
-    CFRelease(description);
-    return isProtected;
-}
-
-static NSArray* getDiskMountPoints(DADiskRef disk) {
-    NSMutableArray* mountpoints = [NSMutableArray array];
-    
-    CFDictionaryRef description = DADiskCopyDescription(disk);
-    if (description != NULL) {
-        CFURLRef volumePath = CFDictionaryGetValue(description, kDADiskDescriptionVolumePathKey);
-        if (volumePath != NULL) {
-            NSString* path = (__bridge NSString*)CFURLCopyFileSystemPath(volumePath, kCFURLPOSIXPathStyle);
-            [mountpoints addObject:path];
-            [path release];
-        }
-        CFRelease(description);
-    }
-    
-    return mountpoints;
-}
-
-static uint64_t getDiskSize(DADiskRef disk) {
-    CFDictionaryRef description = DADiskCopyDescription(disk);
-    if (description == NULL) {
-        return 0;
-    }
-    
-    CFNumberRef size = CFDictionaryGetValue(description, kDADiskDescriptionMediaSizeKey);
-    uint64_t bytes = 0;
-    
-    if (size != NULL) {
-        CFNumberGetValue(size, kCFNumberLongLongType, &bytes);
-    }
-    
-    CFRelease(description);
-    return bytes;
-}
-
-static NSString* getDiskDescription(DADiskRef disk) {
-    CFDictionaryRef description = DADiskCopyDescription(disk);
-    if (description == NULL) {
-        return @"";
-    }
-    
-    CFStringRef model = CFDictionaryGetValue(description, kDADiskDescriptionMediaModelKey);
-    NSString* modelStr = model != NULL ? (__bridge NSString*)model : @"";
-    
-    CFRelease(description);
-    return modelStr;
-}
-
-static NSString* getDiskName(DADiskRef disk) {
-    CFDictionaryRef description = DADiskCopyDescription(disk);
-    if (description == NULL) {
-        return @"";
-    }
-    
-    CFStringRef name = CFDictionaryGetValue(description, kDADiskDescriptionMediaNameKey);
-    NSString* nameStr = name != NULL ? (__bridge NSString*)name : @"";
-    
-    CFRelease(description);
-    return nameStr;
-}
-
-DriveList GetDriveList(void) {
-    DriveList result = {NULL, 0};
-    
-    DASessionRef session = DASessionCreate(kCFAllocatorDefault);
-    if (session == NULL) {
-        return result;
-    }
-    
-    NSMutableArray* drives = [NSMutableArray array];
-    
-    // Get list of disks from IO Registry
-    CFMutableDictionaryRef matchingDict = IOServiceMatching("IOMedia");
-    CFDictionaryAddValue(matchingDict, CFSTR(kIOMediaWholeKey), kCFBooleanTrue);
-    
-    io_iterator_t iter;
-    kern_return_t kr = IOServiceGetMatchingServices(kIOMasterPortDefault, matchingDict, &iter);
-    if (kr != KERN_SUCCESS) {
-        CFRelease(session);
-        return result;
-    }
-    
-    io_service_t service;
-    while ((service = IOIteratorNext(iter)) != IO_OBJECT_NULL) {
-        DADiskRef disk = DADiskCreateFromIOMedia(kCFAllocatorDefault, session, service);
-        if (disk != NULL) {
-            // Get device name (e.g. /dev/disk0)
-            const char* bsdName = DADiskGetBSDName(disk);
-            if (bsdName != NULL) {
-                // Check if this is a mountable disk (skip CD/DVD and other special media)
-                if (isDiskMountable(disk)) {
-                    NSString* devicePath = [NSString stringWithFormat:@"/dev/%s", bsdName];
-                    NSString* rawPath = [NSString stringWithFormat:@"/dev/r%s", bsdName];
-                    NSString* description = getDiskDescription(disk);
-                    NSString* displayName = getDiskName(disk);
-                    if ([displayName length] == 0) {
-                        displayName = devicePath;
-                    }
-                    
-                    NSArray* mountpoints = getDiskMountPoints(disk);
-                    uint64_t size = getDiskSize(disk);
-                    bool isProtected = isProtectedDisk(disk);
-                    bool isSystem = isSystemDisk(disk);
-                    
-                    NSDictionary* driveInfo = @{
-                        @"device": devicePath,
-                        @"displayName": displayName,
-                        @"description": description,
-                        @"size": @(size),
-                        @"mountpoints": mountpoints,
-                        @"raw": rawPath,
-                        @"protected": @(isProtected),
-                        @"system": @(isSystem)
-                    };
-                    
-                    [drives addObject:driveInfo];
-                }
-            }
-            CFRelease(disk);
-        }
-        IOObjectRelease(service);
-    }
-    
-    IOObjectRelease(iter);
-    CFRelease(session);
-    
-    // Convert NSArray to C array
-    result.count = (int)[drives count];
-    result.drives = (DriveInfo*)malloc(sizeof(DriveInfo) * result.count);
-    
-    for (int i = 0; i < result.count; i++) {
-        NSDictionary* drive = drives[i];
-        
-        result.drives[i].device = strdup_safe([[drive objectForKey:@"device"] UTF8String]);
-        result.drives[i].displayName = strdup_safe([[drive objectForKey:@"displayName"] UTF8String]);
-        result.drives[i].description = strdup_safe([[drive objectForKey:@"description"] UTF8String]);
-        result.drives[i].size = [[drive objectForKey:@"size"] unsignedLongLongValue];
-        result.drives[i].raw = strdup_safe([[drive objectForKey:@"raw"] UTF8String]);
-        result.drives[i].is_protected = [[drive objectForKey:@"protected"] boolValue];
-        result.drives[i].system = [[drive objectForKey:@"system"] boolValue];
-        
-        NSArray* mountpoints = [drive objectForKey:@"mountpoints"];
-        result.drives[i].mountpointsCount = (int)[mountpoints count];
-        result.drives[i].mountpoints = (Mountpoint*)malloc(sizeof(Mountpoint) * result.drives[i].mountpointsCount);
-        
-        for (int j = 0; j < result.drives[i].mountpointsCount; j++) {
-            result.drives[i].mountpoints[j].path = strdup_safe([[mountpoints objectAtIndex:j] UTF8String]);
-        }
-    }
-    
-    return result;
+    free(list.error);
 } 

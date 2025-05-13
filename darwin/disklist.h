@@ -1,34 +1,43 @@
-#ifndef DISKLIST_H
-#define DISKLIST_H
+#ifndef GODRIVELIST_DARWIN_DISKLIST_H
+#define GODRIVELIST_DARWIN_DISKLIST_H
 
-#include <stdbool.h>
 #include <stdint.h>
+#include <stdbool.h>
 
-typedef struct
-{
-  char *path;
-} Mountpoint;
+// Defines the structure for mountpoint information
+typedef struct {
+    char *path;
+    char *label;
+} mountpoint_t;
 
-typedef struct
-{
-  char *device;
-  char *displayName;
-  char *description;
-  uint64_t size;
-  Mountpoint *mountpoints;
-  int mountpointsCount;
-  char *raw;
-  bool is_protected;
-  bool system;
-} DriveInfo;
+// Defines the structure for drive information
+typedef struct {
+    char *device;
+    char *display_name;
+    char *description;
+    uint64_t size;
+    mountpoint_t *mountpoints;
+    int mountpoints_count;
+    char *raw;
+    bool protected;
+    bool system;
+    bool removable;
+    bool virtual_drive;
+    bool internal;
+    uint32_t block_size;
+} drive_t;
 
-typedef struct
-{
-  DriveInfo *drives;
-  int count;
-} DriveList;
+// Defines the return structure for the GetDriveList function
+typedef struct {
+    drive_t *drives;
+    int count;
+    char *error;
+} drive_list_t;
 
-DriveList *GetDriveList(void);
-void FreeDriveList(DriveList *list);
+// Main function to get the list of drives
+drive_list_t GetDriveList();
 
-#endif /* DISKLIST_H */
+// Function to free the memory allocated by GetDriveList
+void FreeDriveList(drive_list_t list);
+
+#endif // GODRIVELIST_DARWIN_DISKLIST_H 
