@@ -16,6 +16,10 @@ A Go library to list all connected drives in your computer, supporting all major
   - Protected status
   - System drive status
 
+## Inspiration
+
+This library is a direct port of the Node.js [drivelist](https://github.com/balena-io-modules/drivelist) package. It maintains the same API structure and functionality, just implemented in Go. The original Node.js implementation was created by the Balena team.
+
 ## Installation
 
 ```bash
@@ -51,6 +55,7 @@ func main() {
 ```
 
 Example output (Linux):
+
 ```json
 [
   {
@@ -91,24 +96,27 @@ The project has platform-specific implementations:
 - Common code: `drive.go`
 - Linux implementation: `drive_linux.go`
 - Windows implementation: `drive_windows.go`
-- macOS implementation: 
+- macOS implementation:
   - Go code: `drive_darwin.go`
   - Objective-C code: `darwin/disklist.h` and `darwin/disklist.m`
 
 ## Platform-specific Notes
 
 ### Linux
+
 - Uses `lsblk` command to get drive information
 - Requires `util-linux` package (usually pre-installed)
 
 ### Windows
+
 - Uses Windows API (kernel32.dll) to get drive information
 - Lists all available drives except CD-ROM drives
 
 ### macOS
+
 - Uses DiskArbitration framework and IOKit to get disk information
 - Provides raw device paths with `/dev/rdisk` prefix
 
 ## License
 
-Apache-2.0
+MIT
