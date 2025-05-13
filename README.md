@@ -84,6 +84,17 @@ Example output (Linux):
 ]
 ```
 
+## Project Structure
+
+The project has platform-specific implementations:
+
+- Common code: `drive.go`
+- Linux implementation: `drive_linux.go`
+- Windows implementation: `drive_windows.go`
+- macOS implementation: 
+  - Go code: `drive_darwin.go`
+  - Objective-C code: `darwin/disklist.h` and `darwin/disklist.m`
+
 ## Platform-specific Notes
 
 ### Linux
@@ -95,7 +106,7 @@ Example output (Linux):
 - Lists all available drives except CD-ROM drives
 
 ### macOS
-- Uses `diskutil` command to get drive information
+- Uses DiskArbitration framework and IOKit to get disk information
 - Provides raw device paths with `/dev/rdisk` prefix
 
 ## License
